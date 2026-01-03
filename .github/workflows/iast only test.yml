@@ -1,4 +1,4 @@
-name: scenario-iast-dongtai
+name: IAST-only (OpenRASP + BodgeIt)
 
 on:
   workflow_dispatch:
@@ -7,45 +7,51 @@ jobs:
   iast:
     runs-on: self-hosted
 
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: openrasp
+          MYSQL_USER: rasp
+          MYSQL_PASSWORD: rasp123
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v5
 
-      - name: Start DongTai Server
+      - name: Start OpenRASP IAST server
         run: |
-          git clone https://github.com/HXSecurity/DongTai.git
-          cd DongTai
-          ./build_with_docker_compose.sh
-          sleep 30
+          git clone https://github.com/baidu-security/openrasp-iast.git
+          cd openrasp-iast/docker/iast-cloud
+          docker compose up -d
+          sleep 40
 
-      - name: Build BodgeIt + IAST Agent
-        run: |
-          docker build -t bodgeit-iast .
-
-      - name: Start BodgeIt with IAST
+      - name: Start BodgeIt with OpenRASP Agent
         run: |
           docker run -d \
-            --name bodgeit \
-            --network host \
-            bodgeit-iast
+            -p 8080:8080 \
+            -e JAVA_OPTS="-javaagent:/opt/openrasp/rasp.jar" \
+            -v $(pwd)/openrasp-agent:/opt/openrasp \
+            psiinon/bodgeit
 
-      - name: Wait for App
+          sleep 30
+
+      - name: Generate traffic (IAST trigger)
         run: |
           for i in {1..30}; do
-            if curl -s http://localhost:8080/bodgeit > /dev/null; then
-              echo "BodgeIt ready"
-              exit 0
-            fi
-            sleep 5
+            curl -s http://localhost:8080/bodgeit/ > /dev/null
+            curl -s "http://localhost:8080/bodgeit/search.jsp?search=1%27%20OR%201=1--" > /dev/null
+            sleep 1
           done
-          exit 1
 
-      - name: Generate Runtime Traffic
+      - name: Info
         run: |
-          curl "http://localhost:8080/bodgeit/search.jsp?search=%27+OR+1%3D1--"
-          curl "http://localhost:8080/bodgeit/contact.jsp?message=<script>alert(1)</script>"
-
-      - name: Cleanup
-        run: |
-          docker rm -f bodgeit || true
-          docker compose -f DongTai/docker-compose.yml down || true
+          echo "IAST runs passively. Findings visible in OpenRASP UI."
