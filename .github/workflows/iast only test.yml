@@ -1,71 +1,75 @@
-name: IAST-only (OpenRASP + BodgeIt)
+name: Java + ZAP + OpenTelemetry CI
 
 on:
-  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
-  iast:
-    runs-on: self-hosted
+  build-and-run:
+    name: Build & Run Java App
+    runs-on: ubuntu-latest
 
     services:
-      mysql:
-        image: mysql:5.7
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: openrasp
-          MYSQL_USER: rasp
-          MYSQL_PASSWORD: rasp123
+      app:
+        image: eclipse-temurin:17-jre
         ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost -u rasp -prasp123"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
+          - 8080:8080
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # ----------------------------
-      # Start OpenRASP IAST backend
-      # ----------------------------
-      - name: Start OpenRASP IAST
+      - name: Download OpenTelemetry Java Agent
         run: |
-          git clone https://github.com/baidu-security/openrasp-iast.git
-          cd openrasp-iast/docker/iast-cloud
+          curl -L -o otel-agent.jar \
+            https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar
 
-          # IMPORTANT: explicit MySQL config
-          export MYSQL_URL="mysql://rasp:rasp123@mysql:3306/openrasp"
+      - name: Build Java App
+        run: mvn -B package -DskipTests
 
-          docker compose up -d
-          sleep 40
-
-      # ----------------------------
-      # Start BodgeIt (Java target)
-      # ----------------------------
-      - name: Start BodgeIt
+      - name: Start Java App with OpenTelemetry
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTLP_ENDPOINT }}
         run: |
-          docker rm -f bodgeit || true
+          java \
+            -javaagent:./otel-agent.jar \
+            -Dotel.service.name=bodgeit-java \
+            -Dotel.exporter.otlp.endpoint=${OTEL_EXPORTER_OTLP_ENDPOINT} \
+            -Dotel.metrics.exporter=none \
+            -Dotel.logs.exporter=none \
+            -jar target/*.jar &
+          sleep 20
 
-          docker run -d \
-            --name bodgeit \
-            -p 8080:8080 \
-            psiinon/bodgeit
+  zap-scan:
+    name: ZAP Baseline Scan
+    runs-on: ubuntu-latest
+    needs: build-and-run
 
-          sleep 30
+    steps:
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: http://localhost:8080
+          fail_action: false
 
-      # ----------------------------
-      # Generate traffic (IAST trigger)
-      # ----------------------------
-      - name: Generate traffic
-        run: |
-          for i in {1..20}; do
-            curl -s http://localhost:8080/bodgeit/ > /dev/null
-            curl -s "http://localhost:8080/bodgeit/search.jsp?search=1%27%20OR%201=1--" > /dev/null
-            sleep 1
-          done
+  otel-export:
+    name: Export CI/CD Trace
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [build-and-run, zap-scan]
 
-      - name: Info
-        run: |
-          echo "IAST is passive. Check findings in OpenRASP UI."
+    steps:
+      - name: Export workflow as OpenTelemetry trace
+        uses: corentinmusard/otel-cicd-action@v2
+        with:
+          otlpEndpoint: ${{ secrets.OTLP_ENDPOINT }}
+          otlpHeaders: ${{ secrets.OTLP_HEADERS }}
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          extraAttributes: >
+            scan.type=DAST,
+            app.language=java,
+            orchestration=ci-cd
