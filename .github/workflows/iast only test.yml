@@ -1,4 +1,4 @@
-name: BodgeIt ZAP Runtime Scan
+name: BodgeIt ZAP Runtime Scan (Stable)
 
 on:
   push:
@@ -9,31 +9,35 @@ permissions:
   issues: write
 
 jobs:
-  security-runtime:
+  dast:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download OpenTelemetry Java Agent
-        run: |
-          curl -L -o otel-agent.jar \
-            https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar
-
-      - name: Start BodgeIt (instrumented)
+      - name: Start BodgeIt (forced amd64)
         run: |
           docker run -d \
             --name bodgeit \
+            --platform linux/amd64 \
             -p 8080:8080 \
-            -e JAVA_TOOL_OPTIONS="-javaagent:/otel/otel-agent.jar \
-              -Dotel.service.name=bodgeit \
-              -Dotel.metrics.exporter=none \
-              -Dotel.logs.exporter=none" \
-            -v $PWD/otel-agent.jar:/otel/otel-agent.jar \
             psiinon/bodgeit
 
-          sleep 30
+      - name: Wait until BodgeIt is reachable
+        run: |
+          echo "Waiting for BodgeIt on http://localhost:8080/bodgeit"
+          for i in {1..30}; do
+            if curl -sSf http://localhost:8080/bodgeit > /dev/null; then
+              echo "BodgeIt is UP"
+              exit 0
+            fi
+            echo "Still waiting..."
+            sleep 5
+          done
+          echo "BodgeIt did not start in time"
+          docker logs bodgeit
+          exit 1
 
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
