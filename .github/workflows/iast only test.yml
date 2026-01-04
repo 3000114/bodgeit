@@ -1,6 +1,7 @@
 name: BodgeIt ZAP Runtime Scan (Stable)
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
 
